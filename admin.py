@@ -323,8 +323,32 @@ class AdminWindow:
         top.title("Capturar Rostro")
         top.geometry("500x400")
 
+        # Crear un marco para mostrar el progreso
+        progress_frame = ttk.Frame(top)
+        progress_frame.pack(pady=5)
+        progress_label = ttk.Label(progress_frame, text="Buscando rostro para iniciar captura...")
+        progress_label.pack()
+
+        # Crear una barra de progreso
+        progress_bar = ttk.Progressbar(top, orient="horizontal", length=300, mode="determinate", maximum=10)
+        progress_bar.pack(pady=5)
+
         label_video_capture = tk.Label(top)
         label_video_capture.pack(pady=10)
+
+        # Variable para almacenar las imágenes capturadas
+        captured_images = []
+        is_capturing = [False]  # Usar una lista para poder modificarla en la función anidada
+        rostro_detectado = [False]  # Para controlar si ya se detectó un rostro
+
+        def guardar_imagenes():
+            try:
+                self.logic.registrar_rostro_multiple(nombre, captured_images[:10], carnet_id)
+                messagebox.showinfo("Éxito", f"10 imágenes del rostro de {nombre} registradas correctamente.")
+                top.destroy()
+                self.refrescar_tabla()
+            except Exception as e:
+                messagebox.showerror("Error", f"No se pudo registrar el rostro: {e}")
 
         def actualizar_captura():
             ret, frame = self.cap.read()
@@ -335,46 +359,55 @@ class AdminWindow:
                 )
 
                 frame_copia = frame.copy()
+
+                # Si hay un rostro y no estamos capturando aún, iniciamos la captura
+                if len(faces) > 0 and not is_capturing[0] and not rostro_detectado[0]:
+                    is_capturing[0] = True
+                    rostro_detectado[0] = True
+                    progress_label.config(text="¡Rostro detectado! Capturando imágenes (0/10)")
+
+                # Dibujar rectángulos alrededor de los rostros detectados
                 for (x, y, w, h) in faces:
                     cv2.rectangle(frame_copia, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
+                # Mostrar la imagen en la interfaz
                 img = cv2.cvtColor(frame_copia, cv2.COLOR_BGR2RGB)
                 img = Image.fromarray(img)
                 imgtk = ImageTk.PhotoImage(image=img)
                 label_video_capture.imgtk = imgtk
                 label_video_capture.configure(image=imgtk)
                 label_video_capture.img = imgtk
+
+                # Si estamos en modo captura y hay un rostro, capturamos la imagen
+                if is_capturing[0] and len(faces) > 0:
+                    x, y, w, h = faces[0]  # Capturar el primer rostro detectado
+                    face_roi = frame[y:y + h, x:x + w]
+                    captured_images.append(face_roi)
+
+                    # Actualizar la barra de progreso y el texto
+                    num_captured = len(captured_images)
+                    progress_bar["value"] = num_captured
+                    progress_label.config(text=f"Capturando imágenes ({num_captured}/10)")
+
+                    # Señal visual de captura
+                    cv2.rectangle(frame_copia, (x, y), (x + w, y + h), (0, 0, 255), 3)
+
+                    if num_captured >= 10:
+                        is_capturing[0] = False
+                        progress_label.config(text="¡Captura completa! Guardando...")
+                        # Guardar automáticamente las imágenes después de un corto retraso
+                        top.after(500, guardar_imagenes)
+                    else:
+                        # Pequeño retraso para no tomar todas las imágenes idénticas
+                        # pero lo suficientemente rápido para ser automático
+                        top.after(100, actualizar_captura)
+                        return
+
                 top.after(30, actualizar_captura)
 
-        def capturar():
-            ret, frame = self.cap.read()
-            if not ret:
-                messagebox.showerror("Error", "No se pudo capturar imagen de la cámara.")
-                return
-
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            faces = self.logic.face_cascade.detectMultiScale(gray, 1.1, 5)
-
-            if len(faces) == 0:
-                messagebox.showinfo("Info", "No se detectó ningún rostro.")
-                return
-
-            x, y, w, h = faces[0]
-            face_roi = gray[y:y + h, x:x + w]
-
-            try:
-                self.logic.registrar_rostro_con_carnet(nombre, face_roi, carnet_id)
-                messagebox.showinfo("Éxito", f"Rostro de {nombre} registrado correctamente.")
-                top.destroy()
-                self.refrescar_tabla()
-            except Exception as e:
-                messagebox.showerror("Error", f"No se pudo registrar el rostro: {e}")
-
+        # Iniciar la actualización de la cámara que ahora incluye la detección, captura y guardado automático
         actualizar_captura()
 
-        btn_capturar = tk.Button(top, text="Capturar", command=capturar,
-                                 bg="#4CAF50", fg="white", width=15)
-        btn_capturar.pack(pady=10)
 
     def actualizar_registro(self):
         id_persona = self.entry_id.get().strip()

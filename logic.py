@@ -16,33 +16,53 @@ class FaceAppLogic:
         self.entrenar_modelo()
 
     def crear_tabla(self):
+        # Tabla principal para personas
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS personas (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 nombre TEXT NOT NULL,
-                encoding BLOB NOT NULL,
                 habilitado INTEGER DEFAULT 1,
                 fecha_registro TEXT,
                 expirado INTEGER DEFAULT 0,
                 carnet_id TEXT
             )
         ''')
+
+        # Tabla para almacenar múltiples imágenes por persona
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS imagenes_personas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                persona_id INTEGER NOT NULL,
+                encoding BLOB NOT NULL,
+                FOREIGN KEY (persona_id) REFERENCES personas(id)
+            )
+        ''')
+
         self.com.commit()
 
     def cargar_rostros(self):
-        self.cursor.execute("SELECT nombre, encoding FROM personas")
+        # Consulta para obtener todas las imágenes con su correspondiente nombre de persona
+        self.cursor.execute('''
+            SELECT p.nombre, i.encoding 
+            FROM personas p 
+            JOIN imagenes_personas i ON p.id = i.persona_id
+        ''')
+
         datos = self.cursor.fetchall()
         nombres = []
         encodings = []
+
         for nombre, encoding_blob in datos:
             try:
                 encoding = np.frombuffer(encoding_blob, dtype=np.float64)
-                if len(encoding) != 10000:
+                if len(encoding) != 10000:  # Validar que el encoding tenga el tamaño correcto
                     continue
                 nombres.append(nombre)
                 encodings.append(encoding)
-            except:
+            except Exception as e:
+                print(f"Error al procesar encoding: {e}")
                 continue
+
         return nombres, encodings
 
     def entrenar_modelo(self):
@@ -100,6 +120,41 @@ class FaceAppLogic:
         # Reentrenar el modelo con el nuevo rostro
         self.entrenar_modelo()
 
+    def registrar_rostro_multiple(self, nombre, face_images, carnet_id=""):
+        """
+        Registra una persona con múltiples imágenes de su rostro
+        Almacena una sola entrada en la tabla personas y múltiples imágenes en imagenes_personas
+        """
+        fecha_registro = datetime.now().strftime("%Y-%m-%d")
+
+        # Primero insertamos los datos de la persona
+        self.cursor.execute(
+            "INSERT INTO personas (nombre, fecha_registro, carnet_id) VALUES (?, ?, ?)",
+            (nombre, fecha_registro, carnet_id)
+        )
+
+        # Obtenemos el ID de la persona recién insertada
+        persona_id = self.cursor.lastrowid
+
+        # Ahora insertamos todas las imágenes para esta persona
+        for face_img in face_images:
+            if len(face_img.shape) > 2:
+                face_img = cv2.cvtColor(face_img, cv2.COLOR_BGR2GRAY)
+            face_resized = cv2.resize(face_img, (100, 100))
+            encoding = np.array(face_resized, dtype=np.float64).flatten()
+
+            # Insertamos el encoding en la tabla de imágenes
+            self.cursor.execute(
+                "INSERT INTO imagenes_personas (persona_id, encoding) VALUES (?, ?)",
+                (persona_id, encoding.tobytes())
+            )
+
+        # Confirmar todos los cambios en la base de datos
+        self.com.commit()
+
+        # Reentrenar el modelo con las nuevas imágenes
+        self.entrenar_modelo()
+
     def reconocer_rostro(self, face_img, confidence_threshold=80):
         """Reconoce un rostro usando LBPH"""
         if not self.trained:
@@ -111,7 +166,7 @@ class FaceAppLogic:
 
         try:
             label, confidence = self.recognizer.predict(face_resized)
-            if confidence < confidence_threshold:  # Menor confianza = mejor coincidencia
+            if confidence < confidence_threshold: # Menor confianza = mejor coincidencia
                 nombre = self.label_map.get(label, "Desconocido")
                 return nombre, confidence
         except Exception as e:
@@ -149,16 +204,29 @@ class FaceAppLogic:
 
     def registrar_rostro_con_carnet(self, nombre, face_img, carnet_id=""):
         """Registra un nuevo rostro en la BD con carnet"""
+        fecha_registro = datetime.now().strftime("%Y-%m-%d")
+
+        # Insertar datos de la persona
+        self.cursor.execute(
+            "INSERT INTO personas (nombre, fecha_registro, carnet_id) VALUES (?, ?, ?)",
+            (nombre, fecha_registro, carnet_id)
+        )
+
+        # Obtener ID de la persona recién insertada
+        persona_id = self.cursor.lastrowid
+
+        # Procesar y guardar la imagen
         if len(face_img.shape) > 2:
             face_img = cv2.cvtColor(face_img, cv2.COLOR_BGR2GRAY)
         face_resized = cv2.resize(face_img, (100, 100))
         encoding = np.array(face_resized, dtype=np.float64).flatten()
 
-        fecha_registro = datetime.now().strftime("%Y-%m-%d")
+        # Insertar encoding en la tabla de imágenes
         self.cursor.execute(
-            "INSERT INTO personas (nombre, encoding, fecha_registro, carnet_id) VALUES (?, ?, ?, ?)",
-            (nombre, encoding.tobytes(), fecha_registro, carnet_id)
+            "INSERT INTO imagenes_personas (persona_id, encoding) VALUES (?, ?)",
+            (persona_id, encoding.tobytes())
         )
+
         self.com.commit()
         # Reentrenar el modelo con el nuevo rostro
         self.entrenar_modelo()
@@ -174,10 +242,19 @@ class FaceAppLogic:
         self.entrenar_modelo()
 
     def eliminar_persona(self, id_persona):
-        """Elimina a una persona de la base de datos"""
+        """
+        Elimina a una persona de la base de datos y todas sus imágenes asociadas
+        """
+        # Primero eliminamos todas las imágenes asociadas a la persona
+        self.cursor.execute("DELETE FROM imagenes_personas WHERE persona_id = ?", (id_persona,))
+
+        # Luego eliminamos el registro de la persona
         self.cursor.execute("DELETE FROM personas WHERE id = ?", (id_persona,))
+
+        # Confirmar los cambios
         self.com.commit()
-        # Reentrenar el modelo porque eliminamos una persona
+
+        # Reentrenar el modelo
         self.entrenar_modelo()
 
     def cerrar(self):
